@@ -8,37 +8,49 @@ from matplotlib import rc
 from numpy import linalg as la
 from mpac_cmd import *
 from Version13_dynamicProgramming_multiAgent import *
+from datetime import datetime
 
 ### Agent=0 is quadruped. Agent=1 is drone
+agent = 0
 
 # Set precomputed to True if plan is precomputed and stored in .txt file
 precomputed = True
 
-# First observation: 0 or 1 (corresponding to e=1 and e=1, respectively)
+# First observation: 0 or 1 (corresponding to e=1 and e=2, respectively)
 obs_choice = 0
 
-# if simulation is True we use quadruped and drone. otherwise, we use euler integration etc. for state updates
-simulation = True
+# If save_data is true text files closed loop trajectory, control inputs, solver time, and predicted trajectories are saved
+save_data = True
+
+# if simulation is True we use quadruped and drone, respectively. otherwise, we use euler integration etc. for state updates
+simulation = [True, False]
+
+# Include obstacle avoidance in MPC
+MCP_avoid_obs = False
 
 # =====================================
 # Stand and get initial position
 
-if simulation:
+if simulation[0]:
     stand_idqp()
     data = get_tlm_data()
-    x = data["q"][0]
-    y = data["q"][1]
-    theta = data["q"][5]
+    x_quad = data["q"][0]
+    y_quad = data["q"][1]
+    theta_quad = data["q"][5]
 
 
 
 # =====================================
 ### Root RRT Parameters ###
-if simulation:
-    x0_1 = Node(np.array([x, y]))  # Without theta, for high level plan
-    x0_2 = Node(np.array([0, 0]))  # Without theta, for high level plan
+#quadruped
+if simulation[0]:
+    x0_1 = Node(np.array([x_quad, y_quad]))  # Without theta, for high level plan
 else:
     x0_1 = Node(np.array([0, 0]))  # Without theta, for high level plan
+# drone
+if simulation[1]:
+    x0_2 = Node(np.array([x, y]))  # Without theta, for high level plan  
+else:
     x0_2 = Node(np.array([0, 0]))  # Without theta, for high level plan
 starts = [x0_1, x0_2]
 Xi = [[0, 5], [0, 5]]
@@ -87,8 +99,7 @@ if not precomputed:
     plan_ends = flatten_plan(best_plan)
     plan_node_agent1 = plan_ends[0][obs_choice]  # Hard coded, aka "pre-defined observations" for now
     plan_node_agent2 = plan_ends[1][obs_choice]  # Hard coded, aka "pre-defined observations" for now
-    print('end1: ' + str(plan_node_agent1.state))
-    print('end2: ' + str(plan_node_agent2.state))
+
 
 
 
@@ -97,24 +108,29 @@ if not precomputed:
 
 # =============================
 # Initialize system parameters for two agents
-if not simulation:
+# quadruped
+if not simulation[0]:
     x0_agent1 = np.append(x0_1.state, 0)  # With theta, for robot dynamics
+else:
+    x0_agent1 = np.append(x0_1.state, theta_quad)  # With theta, for robot dynamics
+# drone
+if not simulation[1]:
     x0_agent2 = np.append(x0_1.state, 0)  # With theta, for robot dynamics
 else:
-    x0_agent1 = np.append(x0_1.state, theta)  # With theta, for robot dynamics
-    x0_agent2 = np.append(x0_1.state, 0)  # With theta, for robot dynamics
+    x0_agent2 = np.append(x0_1.state, yaw)  # With theta, for robot dynamics  
 
 
 
 dt = 0.1  # Discretization time
-sys_agent1 = system(x0_agent1, dt, agent=0)  # initialize system object
-sys_agent2 = system(x0_agent2, dt, agent=1)  # initialize system object
+sys_agent1 = system(x0_agent1, dt, agent=0, simulation=simulation)  # initialize system object
+sys_agent2 = system(x0_agent2, dt, agent=1, simulation=simulation)  # initialize system object
 
 maxTime = 100  # Simulation time
 
 
 # Initialize mpc parameters
 N = 15
+N_MPC = N  # To avoid any confusion/mix-up with N_RRT
 n = 3
 d = 2
 Q = 1 * np.eye(n)
@@ -214,8 +230,8 @@ while hierarchy <= max_hierarchy:  # TODO: Change to 2 for two observations (or 
 
     # goal = all_goals_test[0] # FOR TESTING
 
-    nlp_agent1 = NLP(N, Q, R, dR, Qf, goal_agent1, dt, xub_agent1, uub_agent1, printLevel, 0, ellipse)
-    nlp_agent2 = NLP(N, Q, R, dR, Qf, goal_agent2, dt, xub_agent2, uub_agent2, printLevel, 1, ellipse)
+    nlp_agent1 = NLP(N, Q, R, dR, Qf, goal_agent1, dt, xub_agent1, uub_agent1, printLevel, 0, ellipse, MCP_avoid_obs)
+    nlp_agent2 = NLP(N, Q, R, dR, Qf, goal_agent2, dt, xub_agent2, uub_agent2, printLevel, 1, ellipse, MCP_avoid_obs)
 
     xt_agent1 = sys_agent1.x[-1]
     xt_agent2 = sys_agent2.x[-1]
@@ -235,7 +251,18 @@ while hierarchy <= max_hierarchy:  # TODO: Change to 2 for two observations (or 
         xPredNLP_agent1.append(nlp_agent1.xPred)  # store predicted trajectory at time t
         xPredNLP_agent2.append(nlp_agent2.xPred)  # store predicted trajectory at time t
         sys_agent1.applyInput(ut_agent1)
+
         sys_agent2.applyInput(ut_agent2)
+
+        # TODO: Appy input here for drone
+
+        # Compute state_next here for drone, due to ROS 
+        if simulation[1]:
+            x_next = x
+            y_next = y
+            theta_next = yaw  # TODO: Correct?
+            state_next = np.array([x_next, y_next, theta_next])  
+            sys_agent2.x.append(state_next)
 
         dists = np.array([np.linalg.norm(sys_agent1.x[-1][:-1] - goal_agent1[:-1]), np.linalg.norm(sys_agent1.x[-1][:-1] - goal_agent1[:-1])])
         i+=1
@@ -248,10 +275,9 @@ while hierarchy <= max_hierarchy:  # TODO: Change to 2 for two observations (or 
                 if goal_node_temp_agent1 == path_agent1[-1]:
                     finished[0] = True
                     # Stop Agent to wait for other to reach goal state (not optimal solution)
-                    if simulation:
+                    if simulation[0]:
                         walk_mpc_idqp()
                     else:
-                        # nlp_agent1 = NLP(N, Q, R, dR, Qf, goal_agent1, dt, xub_agent1, np.array([0, 0]), printLevel, 0, ellipse)
                         pass
                 else:
                     node_number_agent1 += 1
@@ -263,13 +289,16 @@ while hierarchy <= max_hierarchy:  # TODO: Change to 2 for two observations (or 
                     goal_agent1 = goal_node_temp_agent1.state.reshape(2, ).copy()
                     print('goal1: ' + str(goal_agent1))
                     goal_agent1 = np.append(goal_agent1, np.pi)
-                    nlp_agent1 = NLP(N, Q, R, dR, Qf, goal_agent1, dt, xub_agent1, uub_agent1, printLevel, 0, ellipse)
+                    nlp_agent1 = NLP(N, Q, R, dR, Qf, goal_agent1, dt, xub_agent1, uub_agent1, printLevel, 0, ellipse, MCP_avoid_obs)
             # Agent 2
             if dists[1] < eps:
                 if goal_node_temp_agent2 == path_agent2[-1]:
                     finished[1] = True
                     # Stop Agent to wait for other to reach goal state (not optimal solution)
-                    nlp_agent2 = NLP(N, Q, R, dR, Qf, goal_agent2, dt, xub_agent2, np.array([0, 0]), printLevel, 1, ellipse)
+                    if simulation[1]:
+                        pass # TODO: stop drone
+                    else:
+                        pass
                 else:
                     node_number_agent2 += 1
                     if not precomputed:
@@ -280,28 +309,36 @@ while hierarchy <= max_hierarchy:  # TODO: Change to 2 for two observations (or 
                     goal_agent2 = goal_node_temp_agent2.state.reshape(2, ).copy()
                     print('goal2: ' + str(goal_agent2))
                     goal_agent2 = np.append(goal_agent2, np.pi)
-                    nlp_agent2 = NLP(N, Q, R, dR, Qf, goal_agent2, dt, xub_agent2, uub_agent2, printLevel, 1, ellipse)
+                    nlp_agent2 = NLP(N, Q, R, dR, Qf, goal_agent2, dt, xub_agent2, uub_agent2, printLevel, 1, ellipse, MCP_avoid_obs)
 
 
     hierarchy += 1
-    if simulation:  # stop agents
-        walk_mpc_idqp()
+    if simulation[0]:  # stop agents
+        walk_mpc_idqp()  
+        stand_idqp()
+        time.sleep(5)
         lie()
+    if simulation[1]:
+        # TODO: stop drone
+        pass
+
     # if not goal_node_temp.children:  # Plan is finished
         # break
 
-for t in range(0, maxTime):  # Time loop
-    xt_agent1 = sys_agent1.x[-1]
-    xt_agent2 = sys_agent2.x[-1]
-    ut_agent1 = nlp_agent1.solve(xt_agent1, verbose=False)  # compute control input at time t
-    ut_agent2 = nlp_agent2.solve(xt_agent2, verbose=False)  # compute control input at time t
-    xPredNLP_agent1.append(nlp_agent1.xPred)  # store predicted trajectory at time t
-    xPredNLP_agent2.append(nlp_agent2.xPred)  # store predicted trajectory at time t
-    sys_agent1.applyInput(ut_agent1)
-    sys_agent2.applyInput(ut_agent2)
+# for t in range(0, maxTime):  # Time loop
+#     xt_agent1 = sys_agent1.x[-1]
+#     xt_agent2 = sys_agent2.x[-1]
+#     ut_agent1 = nlp_agent1.solve(xt_agent1, verbose=False)  # compute control input at time t
+#     ut_agent2 = nlp_agent2.solve(xt_agent2, verbose=False)  # compute control input at time t
+#     xPredNLP_agent1.append(nlp_agent1.xPred)  # store predicted trajectory at time t
+#     xPredNLP_agent2.append(nlp_agent2.xPred)  # store predicted trajectory at time t
+#     sys_agent1.applyInput(ut_agent1)
+#     sys_agent2.applyInput(ut_agent2)
 
 x_cl_nlp_agent1 = np.array(sys_agent1.x)
 x_cl_nlp_agent2 = np.array(sys_agent2.x)
+u_cl_nlp_agent1 = np.array(sys_agent1.u)
+u_cl_nlp_agent2 = np.array(sys_agent2.u)
 
 # for timeToPlot in [0, 10]:
  #    plt.figure()
@@ -314,6 +351,39 @@ x_cl_nlp_agent2 = np.array(sys_agent2.x)
    #  plt.xlim(-1, 12)
    #  plt.ylim(-1, 10)
    #  plt.legend()
+
+
+# Save data
+if save_data:
+    now = datetime.now()
+ 
+    dt_string = now.strftime("%d_%m_%Y_%H_%M_%S_")
+
+    # Closed Loop Trajectories
+    np.savetxt('data/' + dt_string + 'x_cl_nlp_agent1.txt', x_cl_nlp_agent1) 
+    np.savetxt('data/' + dt_string + 'x_cl_nlp_agent2.txt', x_cl_nlp_agent2) 
+
+    # Control inputs
+    np.savetxt('data/' + dt_string + 'u_cl_nlp_agent1.txt', u_cl_nlp_agent1) 
+    np.savetxt('data/' + dt_string + 'u_cl_nlp_agent2.txt', u_cl_nlp_agent2) 
+
+    # NLP Solver Times
+    np.savetxt('data/' + dt_string + 'solverTime_agent1.txt', np.array(nlp_agent1.solverTime))
+    np.savetxt('data/' + dt_string + 'solverTime_agent2.txt', np.array(nlp_agent2.solverTime))  
+
+    # Predicted Trajectories
+    # Agent 1
+    pred_temp = open("data/" + dt_string + "xPredNLP_agent1_Nmpc" + str(N_MPC) + ".txt", "w")
+    for row in xPredNLP_agent1:
+        row = row.reshape(-1, n)
+        np.savetxt(pred_temp, row, delimiter=',')
+    pred_temp.close()
+    # Agent 2
+    pred_temp = open("data/" + dt_string + "xPredNLP_agent2_Nmpc" + str(N_MPC) + ".txt", "w")
+    for row in xPredNLP_agent2:
+        row = row.reshape(-1, n)
+        np.savetxt(pred_temp, row, delimiter=',')
+    pred_temp.close()
 
 ### Plot environment and closed loop trajectories
 plt.figure()

@@ -12,7 +12,7 @@ class NLP(object):
     """ Non-Linear Program
 	"""
 
-    def __init__(self, N, Q, R, dR, Qf, goal, dt, bx, bu, printLevel, agent, ellipse):
+    def __init__(self, N, Q, R, dR, Qf, goal, dt, bx, bu, printLevel, agent, ellipse, avoid_obs=False):
         # Define variables
         self.N = N
         self.n = Q.shape[1]
@@ -27,6 +27,7 @@ class NLP(object):
         self.dt = dt
         self.ellipse = ellipse
         self.agent = agent
+        self.avoid_obs = avoid_obs
 
         self.bx = bx
         self.bu = bu
@@ -43,7 +44,7 @@ class NLP(object):
         self.lbx = x0.tolist() + (-self.bx).tolist() * (self.N) + (-self.bu).tolist() * self.N
         self.ubx = x0.tolist() + (self.bx).tolist() * (self.N) + (self.bu).tolist() * self.N
 
-        if self.agent==0:  # Obstacle constraint
+        if self.agent==0 and self.avoid_obs:  # Obstacle constraint
             self.lbx = self.lbx + [1] * (self.N-1) # + [-1000] * self.n
             self.ubx = self.ubx + [100000] * (self.N-1)  # + [1000] * self.n 
 
@@ -51,7 +52,7 @@ class NLP(object):
         start = time.time()
         sol = self.solver(lbx=self.lbx, ubx=self.ubx, lbg=self.lbg_dyanmics, ubg=self.ubg_dyanmics)
         end = time.time()
-        self.solverTime = end - start
+        self.solverTime.append(end - start)
 
         # Check if the solution is feasible
         if (self.solver.stats()['success']):
@@ -68,7 +69,7 @@ class NLP(object):
                 print("uPredicted:")
                 print(self.uPred)
 
-            if self.printLevel >= 1: print("NLP Solver Time: ", self.solverTime, " seconds.")
+            if self.printLevel >= 1: print("NLP Solver Time: ", self.solverTime[-1], " seconds.")
 
         else:
             self.xPred = np.zeros((self.N + 1, self.n))
@@ -88,8 +89,8 @@ class NLP(object):
         # Define variables
         X = SX.sym('X', n * (self.N + 1))
         U = SX.sym('U', d * self.N)
-        # slack = SX.sym('X', n);
-        slackObs = SX.sym('X', (self.N-1));
+        if self.avoid_obs:
+            slackObs = SX.sym('X', (self.N-1))
 
         # Define dynamic constraints
         self.constraint = []
@@ -99,10 +100,10 @@ class NLP(object):
                 self.constraint = vertcat(self.constraint, X_next[j] - X[n * (i + 1) + j])
 
         # Obstacle constraint for quadruped
-        if self.agent==0:
-            for i in range(1, N):
-                self.constraint = vertcat(self.constraint, ((X[n*i+0] -  self.ellipse[0])**2/self.ellipse[2]**2) + ((X[n*i+1] - self.ellipse[1])**2/self.ellipse[3]**2) - slackObs[i-1])
-            # self.constraint = vertcat(self.constraint, X[n*N:n*(N+1)] - self.goal + slack) 
+        if self.avoid_obs:
+            if self.agent==0:
+                for i in range(1, N):
+                    self.constraint = vertcat(self.constraint, ((X[n*i+0] -  self.ellipse[0])**2/self.ellipse[2]**2) + ((X[n*i+1] - self.ellipse[1])**2/self.ellipse[3]**2) - slackObs[i-1])
 
             # Defining Cost (We will add stage cost later)
         self.cost = 0
@@ -117,28 +118,17 @@ class NLP(object):
         self.cost = self.cost + (X[n * self.N:n * (self.N + 1)] - self.goal).T @ self.Qf @ (
                 X[n * self.N:n * (self.N + 1)] - self.goal)
 
-        if self.agent==0:
-            #self.cost = 10*(-slack[0]**2 - slack[1]**2)
-            # self.cost = 100 * (1 / (slackObs[0] + 0.00001) + 1 / (slackObs[1] + 0.00001))
-            for i in range(1,N):
-                # self.cost = self.cost + (-np.log(slackObs[i-1]-1))
-                #self.cost = self.cost + 100/(slackObs[i-1]+ 0.00001)
-                pass
 
-        
-        # Add cost for being near obstacle for quadruped
-        #if self.agent==0:
-            #for i in range(1,n):
-                #self.cost = self.cost + (-np.log(slack[i-1]-1))
+
 
         # Set IPOPT options
         # opts = {"verbose":False,"ipopt.print_level":0,"print_time":0,"ipopt.mu_strategy":"adaptive","ipopt.mu_init":1e-5,"ipopt.mu_min":1e-15,"ipopt.barrier_tol_factor":1}#, "ipopt.acceptable_constr_viol_tol":0.001}#,"ipopt.acceptable_tol":1e-4}#, "expand":True}
         opts = {"verbose": False, "ipopt.print_level": 0,
                 "print_time": 0}  # \\, "ipopt.acceptable_constr_viol_tol":0.001}#,"ipopt.acceptable_tol":1e-4}#, "expand":True}
         
-        if self.agent==0:
+        if self.agent==0 and self.avoid_obs:
             nlp = {'x':vertcat(X,U, slackObs), 'f': self.cost, 'g': self.constraint}
-        elif self.agent==1:
+        else:
             nlp = {'x': vertcat(X, U), 'f': self.cost, 'g': self.constraint}
         self.solver = nlpsol('solver', 'ipopt', nlp, opts)
 
@@ -146,7 +136,7 @@ class NLP(object):
         self.lbg_dyanmics = [0] * (n * self.N)
         self.ubg_dyanmics = [0] * (n * self.N)
 
-        if self.agent==0:  # Add obstacle constraint for quadruped
+        if self.agent==0 and self.avoid_obs:  # Add obstacle constraint for quadruped
             self.lbg_dyanmics = self.lbg_dyanmics + [0*1.0]*(N-1) #+ [0]*n
             self.ubg_dyanmics = self.ubg_dyanmics + [0*100000000]*(N-1) #+ [0]*n
             
